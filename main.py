@@ -14,18 +14,21 @@ class Entreprise(mesa.Agent):
         self.purpose = purpose # Soit : agrifood, food_raw_material 
         self.labor = labor
         self.step_labor = 0
+        self.last_labor = 0
         self.total_labor = 0
         self.employees: list[Individual] = []
-        self.products = {
-            "wheet" : 0.0,
-            "bread" : 0.0
-        }
+        self.products = {"wheet" : 0.0, "bread" : 0.0} # Stock
+
+        # Statistiques
         self.step_production = 0
         self.step_sold = 0
         self.step_demanded = 0
+        self.step_costs = 0 # <--- NOUVEAU : Pour calculer le coût de revient
+        self.unit_cost = 0  # <--- NOUVEAU : Coût d'un produit
+        self.step_consumption_price = 0
+
         self.product_price = price
-        self.sold = 0
-        self.money = 10000
+        self.money = 15000
 
     def add_labour(self, work_done):
         self.step_labor += work_done
@@ -33,96 +36,161 @@ class Entreprise(mesa.Agent):
 
 
     def request_work(self, individual):
-        
-        if (True):
-            individual.working_at = self
-            self.employees.append(individual)
-            return True
-        return False
+        # Simplification : on accepte tout le monde pour l'instant
+        individual.working_at = self
+        self.employees.append(individual)
+        return True
     
     def produce(self):
+        # On calcule combien on peut produire
+        production = 0
         if self.purpose == "food_raw_material":
-            self.products["wheet"] += self.step_labor / self.labor
-            self.step_production += self.step_labor / self.labor
+            production = self.step_labor / self.labor
+            self.products["wheet"] += production
         
         elif self.purpose == "agrifood":
-            production = min(self.step_labor/self.labor, self.products.get("wheet")/3)
+            # Fonction de production Leontief (Need 3 wheet for 1 bread)
+            max_possible_by_wheet = self.products["wheet"] / 3
+            max_possible_by_labor = self.step_labor / self.labor
+            
+            production = min(max_possible_by_labor, max_possible_by_wheet)
+            
             self.products["bread"] += production
-            self.products['wheet'] -= production* 3
-            self.step_production += production
+            self.products['wheet'] -= production * 3
 
-    def set_price(self):
-        if self.step_demanded > self.step_sold * 0.95:
-            self.product_price *= 1.05
-        elif self.step_sold < self.step_production * 0.8:
-            if self.product_price > (self.labor + 3) * 1.1:
-                self.product_price *= 0.95
+        self.step_production = production
 
+
+
+    def income_distribution(self):
+        # Paiement des salaires
+        for employee in self.employees:
+            if self.money <= 0.1: break
+            
+            salary = employee.current_skill # Salaire = compétence
+            to_pay = min(self.money, salary)
+            
+            employee.wealth += to_pay
+            self.money -= to_pay
+            self.step_costs += to_pay # <-- On enregistre le coût !
+
+
+    def intermediary_consumption(self):
+        if self.purpose != "agrifood": return
+            
+        # 1. Identifier le besoin
+        capacite_travail = min((self.step_labor / self.labor) * 3 * 2, self.step_demanded/3)
+        ble_necessaire = (capacite_travail ) - self.products['wheet']
+        
+        if ble_necessaire <= 0: return
+
+        # 2. Trouver les vendeurs
+        vendeurs = self.model.agents.select(lambda a: isinstance(a, Entreprise) and a.purpose == "food_raw_material")
+        if not vendeurs: return
+        
+        # Tri par prix croissant
+        vendeurs_tries = sorted(vendeurs, key=lambda x: x.product_price)
+        
+        self.step_consumption_price = vendeurs_tries[0].product_price
+
+        i = 0
+        while ble_necessaire > 0.1 and self.money > 0 and i < len(vendeurs_tries):
+            vendeur = vendeurs_tries[i]
+            
+            if vendeur.products['wheet'] > 0:
+                # Quantité max qu'on peut acheter
+                qty = min(ble_necessaire, vendeur.products['wheet'], self.money / vendeur.product_price)
+                
+                cout = qty * vendeur.product_price
+                
+                # Transaction
+                self.money -= cout
+                self.step_costs += cout # <-- On enregistre le coût matière !
+                self.products['wheet'] += qty
+                
+                vendeur.money += cout
+                vendeur.products['wheet'] -= qty
+                vendeur.step_sold += qty
+                # Important : on note la demande chez le vendeur même si on achète pas tout
+                vendeur.step_demanded += min(ble_necessaire, self.money/vendeur.product_price) 
+                
+                ble_necessaire -= qty
+            i += 1
+
+    def update_unit_cost(self):
+        # On calcule le coût marginal théorique (plus stable)
+        # Salaire moyen (basé sur les compétences des employés)
+        if len(self.employees) > 0:
+            avg_salary = sum([e.current_skill for e in self.employees]) / len(self.employees)
+        else:
+            avg_salary = 1.0 # Valeur par défaut
+
+        # Coût du travail pour 1 unité
+        work_cost = avg_salary * self.labor
+        
+        # Coût des matières premières
+        raw_material_cost = 0
+        if self.purpose == "agrifood":
+            raw_material_cost = 3 * self.step_consumption_price
+            
+        current_theoretical_cost = work_cost + raw_material_cost
+        
+        # Lissage pour éviter les sauts brusques
+        if self.unit_cost == 0: 
+            self.unit_cost = current_theoretical_cost
+        else:
+            self.unit_cost = (self.unit_cost * 0.9) + (current_theoretical_cost * 0.1)
+
+
+    def adjust_price(self):
+        final_good = "wheet" if self.purpose == "food_raw_material" else "bread"
+        current_stock = self.products[final_good]
+        
+        # Si on n'a rien vendu, on ne peut PAS augmenter le prix, c'est illogique
+        if self.step_sold == 0:
+            if current_stock > 0 and self.product_price > self.unit_cost:
+                self.product_price *= 0.90 # On baisse si on a du stock invendu
             
 
 
 
-    def intermediary_consumption(self):
-        if self.purpose == "agrifood":
-            fournisseurs: list[Entreprise] = self.model.agents.select(lambda a: isinstance(a, Entreprise) and a.purpose == "food_raw_material")
-            fournisseurs = fournisseurs.sort("product_price")
+        if self.last_labor-0.2 > self.step_labor - len(self.employees)*0.01:
+            self.product_price *= 0.90
+        # Si on a vendu, on regarde la tension
+        # On n'augmente que si la demande est vraiment supérieure à l'offre ET qu'on a vendu
+        elif self.step_demanded > self.step_sold:
+            self.product_price *= 1.05 # Hausse prudente
+            
+        elif current_stock > 300: # Stock trop élevé
+            self.product_price *= 0.95
 
-            if self.products['wheet']/3 < self.step_labor/self.labor:
-                wheet_needed = (self.step_labor/self.labor - self.products['wheet']/3)*3
-                i = 0
-                while wheet_needed > 0 and self.money > 0:
-                    wheet_to_buy = min(fournisseurs[i].products['wheet'], wheet_needed)
-                    wheet_price = min(wheet_to_buy*fournisseurs[i].product_price, self.money)
-
-                    fournisseurs[i].step_demanded += wheet_to_buy
-                    if self.step_production > self.step_demanded:
-                        break
-
-                    if wheet_price == self.money:
-                        wheet_to_buy = self.money/fournisseurs[i].product_price
-                    
-                    fournisseurs[i].money += wheet_price
-                    fournisseurs[i].step_sold += wheet_to_buy
-                    self.money -= wheet_price
-
-                    fournisseurs[i].products['wheet'] -= wheet_to_buy
-                    self.products['wheet'] += wheet_to_buy
-                    wheet_needed -= wheet_to_buy
-                    
-                    i +=1
-                    if i >= len(fournisseurs):
-                        break
-
-    def income_distribution(self):
-        for employee in self.employees:
-            if self.money  <= 1.0:
-                break
-            employee.wealth += employee.current_skill
-            self.money -= employee.current_skill
-        
-    
+        self.step_sold = 0
+        self.step_demanded = 0  
+        print(f"Last labor : {self.last_labor:.2f} | Step Labor : {self.step_labor:.2f}")
+        self.last_labor = self.step_labor      
+        self.step_labor = 0
 
     
     def step(self):
-        self.income_distribution()
 
-        self.intermediary_consumption()
-
-        print(f"Step Production : {self.step_production:.2f}")
-        print(f"Step Demanded : {self.step_demanded:.2f}")
-        print(f"Step Sold : {self.step_sold:.2f}")
-
-        self.set_price()
+        # Reset des compteurs de tour
+        self.step_costs = 0
         
-        self.step_production = 0
+        # 1. Payer les gens (Flux monétaire sortant)
+        self.income_distribution()
+        
+        # 2. Acheter matières premières (Flux monétaire sortant)
+        self.intermediary_consumption()
+        
+        # 3. Produire (Création de valeur)
         self.produce()
+        self.update_unit_cost()
 
         products_formated = {key: round(value, 2) for key, value in self.products.items()}
-        print(f"Id :{self.name} | Money : {self.money:.2f}$ | Products : {products_formated} | Price : {self.product_price:.2f} | Work done {self.step_labor/self.labor:.2f}")
+        print(f"Id :\033[91m{self.name}\033[0m | Money : {self.money:.2f}$ | Products : {products_formated} | Price : {self.product_price:.2f} | Production {self.step_production:.2f} | Demand : {self.step_demanded:.2f}")
 
-        self.step_sold = 0
-        self.step_labor = 0
-        self.step_demanded = 0
+
+
 
 
 class Individual(mesa.Agent):
@@ -138,6 +206,7 @@ class Individual(mesa.Agent):
         self.inventory = {
             "bread": 0
         }
+        self.step_price = 0
         self.current_skill = None
     
     def demand_work(self):
@@ -147,44 +216,68 @@ class Individual(mesa.Agent):
                 self.current_skill = self.skills.get(self.working_at.purpose)
 
     def work(self):
-        if self.working_at is not None:
+        if self.working_at is not None and self.hunger > 0:
             self.current_skill += 0.01
             self.working_at.add_labour(self.current_skill)
 
     def buy(self, desired_product):
         if desired_product == "bread":
-            entreprises: list[Entreprise] = self.model.agents.select(lambda a: isinstance(a, Entreprise) and a.purpose == "agrifood")
-            entreprises = entreprises.sort("product_price")
+            # 1. Récupérer et trier les boulangeries
+            boulangeries = self.model.agents.select(lambda a: isinstance(a, Entreprise) and a.purpose == "agrifood")
+            if not boulangeries: return
+            
+            # Trier par prix (Mesa utilise souvent des listes d'agents qu'on peut trier ainsi)
+            entreprises = sorted(boulangeries, key=lambda x: x.product_price)
+            self.step_price = entreprises[0].product_price
 
+            # 2. Calculer le besoin réel (Combien je VEUX manger + un petit stock de sécurité)
+            # On veut compenser la faim actuelle + avoir un peu d'avance (max 2 pains au total)
+            ideal_stock = 2.0
+            product_needed = int(max(0, ideal_stock - self.inventory['bread']))
+            
+            if product_needed <= 0: return
 
-        if self.inventory['bread'] <= 0:
-            product_needed = (100-self.hunger)/25
-
+            # 3. Calculer le budget (Combien je PEUX mettre)
+            # Stratégie : Je dépense au max 30% de ma richesse, 
+            # MAIS si j'ai très faim (hunger < 50), je peux monter jusqu'à 90%
+            budget_ratio = 0.3 if self.hunger > 50 else 0.9
+            accepted_price = self.wealth * budget_ratio
             
             i = 0
-            while product_needed > 0 and self.wealth > 0:
-                product_to_buy = min(entreprises[i].products[desired_product], product_needed)
-                product_price = min(product_to_buy*entreprises[i].product_price, self.wealth)
-
-                entreprises[i].step_demanded += product_to_buy
-
-                if self.hunger*1.5 > self.wealth:
-                    break
-
-                if product_price == self.wealth:
-                    product_to_buy = self.wealth/entreprises[i].product_price
+            while product_needed > 0.01 and accepted_price > 0.01 and i < len(entreprises):
+                vendeur = entreprises[i]
                 
-                entreprises[i].money += product_price
-                entreprises[i].step_sold += product_to_buy
-                self.wealth -= product_price
-
-                entreprises[i].products[desired_product] -= product_to_buy
-                self.inventory[desired_product] += product_to_buy
-                product_needed -= product_to_buy
+                # Prix unitaire du vendeur
+                price = vendeur.product_price
                 
-                i +=1
-                if i >= len(entreprises):
-                    break
+                # Combien puis-je acheter avec mon budget chez lui ?
+                max_payable = int(accepted_price / price)
+                
+                # Quantité finale pour cette transaction
+                qty_to_buy = min(product_needed, int(vendeur.products['bread']), max_payable)
+                
+                # Enregistrer la demande solvable (très important pour l'ajustement des prix)
+                vendeur.step_demanded += min(product_needed, max_payable)
+
+                if qty_to_buy > 0:
+                    transaction_total = qty_to_buy * price
+                    
+                    # Transfert d'argent
+                    self.wealth -= transaction_total
+                    vendeur.money += transaction_total
+                    
+                    # Transfert de marchandise
+                    vendeur.products['bread'] -= qty_to_buy
+                    self.inventory['bread'] += qty_to_buy
+                    
+                    # Mise à jour des stats vendeur
+                    vendeur.step_sold += qty_to_buy
+                    
+                    # Mise à jour des besoins individuels
+                    product_needed -= qty_to_buy
+                    accepted_price -= transaction_total
+                
+                i += 1
 
     def eat(self):
         to_eat = (100-self.hunger)/25
@@ -193,15 +286,16 @@ class Individual(mesa.Agent):
         self.inventory['bread'] -= can_be_eaten
         self.hunger += can_be_eaten*25
 
+    def stat(self):
+        print(f"Id :{self.unique_id} | Money : {self.wealth:.2f}$ | Hunger : {int(self.hunger)} | Working at {self.working_at if self.working_at is None else self.working_at.name}")
 
 
     def step(self):
-        self.hunger -= 5
+        self.hunger -= 2
         self.demand_work()
         self.work()
         self.buy("bread")
         self.eat()
-        # print(f"Id :{self.unique_id} | Money : {self.wealth:.2f}$ | Hunger : {int(self.hunger)} | Working at {self.working_at if self.working_at is None else self.working_at.name}")
 
 
 
@@ -218,23 +312,45 @@ class Society(mesa.Model):
             Entreprise(self, entreprise[0], entreprise[1], entreprise[2], entreprise[3])
     
     def step(self):
-        # 1. On récupère uniquement les individus et on les fait agir
+        # 1. Les individus travaillent (on remplit step_labor des entreprises)
         individus = self.agents.select(lambda a: isinstance(a, Individual))
-        individus.shuffle_do("step")
-        print(f"Moyenne d'argent d'un individu : {sum([individu.wealth for individu in individus])/len(individus):.2f}$")
-        print(f"Moyenne de faim : {sum([individu.hunger for individu in individus])/len(individus):.2f}")
-        # 2. Une fois que TOUS les individus ont fini, on fait agir les entreprises
-        entreprises = self.agents.select(lambda a: isinstance(a, Entreprise))
-        entreprises.shuffle_do("step")
+        individus.shuffle_do("step") 
+
+        # 2. Les entreprises transforment le travail en produits
+        # On commence par le blé pour que les boulangeries puissent l'acheter ensuite
+        providers = self.agents.select(lambda a: isinstance(a, Entreprise) and a.purpose == "food_raw_material")
+        agrifoods = self.agents.select(lambda a: isinstance(a, Entreprise) and a.purpose == "agrifood")
+        
+        # On lance le cycle des entreprises (paie, achat matières, production)
+        for e in providers: e.step()
+        for e in agrifoods: e.step()
+
+        # 3. Ajustement des prix pour TOUTES les entreprises (basé sur step_sold du tour précédent)
+        all_entreprises = self.agents.select(lambda a: isinstance(a, Entreprise))
+        for e in all_entreprises:
+            e.adjust_price()
+            e.step_demanded = 0
+
+        # Logs
+        print(f"Moyenne Argent Individus : {sum([i.wealth for i in individus])/len(individus):.2f}$")
+        print(f"Satiété moyenne : {sum([i.hunger for i in individus])/len(individus):.2f}")
+    
+    def individual_stats(self):
+        individus = self.agents.select(lambda a: isinstance(a, Individual))
+
+        for i in individus: i.stat()
 
 
-society_1 = Society(100, (('WheetCo', "food_raw_material", 1, 1), ('FarmCo', "food_raw_material", 1, 1), ("BreadCo", "agrifood", 2, 1)))
 
 
 
-for i in range(100):
+society_1 = Society(100, (('WheetCo', "food_raw_material", 1, 1), ('FarmCo', "food_raw_material", 1, 1), ("BreadCo", "agrifood", 2, 3), ("BakeryCo", "agrifood", 2, 3)))
+
+
+
+for i in range(500):
     print("Step number :", i,"-------------------------")
     society_1.step()
 
 
-
+society_1.individual_stats()
