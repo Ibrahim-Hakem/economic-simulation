@@ -79,7 +79,7 @@ class Entreprise(mesa.Agent):
         if self.purpose != "agrifood": return
             
         # 1. Identifier le besoin
-        capacite_travail = min((self.step_labor / self.labor) * 3 * 2, self.step_demanded/3)
+        capacite_travail = min((self.step_labor / self.labor) * 3 * 2, self.step_demanded*3)
         ble_necessaire = (capacite_travail ) - self.products['wheet']
         
         if ble_necessaire <= 0: return
@@ -95,8 +95,11 @@ class Entreprise(mesa.Agent):
 
         i = 0
         while ble_necessaire > 0.1 and self.money > 0 and i < len(vendeurs_tries):
-            vendeur = vendeurs_tries[i]
+            vendeur: Entreprise = vendeurs_tries[i]
             
+            # Important : on note la demande chez le vendeur même si on achète pas tout
+            vendeur.step_demanded += min(ble_necessaire, self.money/vendeur.product_price) 
+
             if vendeur.products['wheet'] > 0:
                 # Quantité max qu'on peut acheter
                 qty = min(ble_necessaire, vendeur.products['wheet'], self.money / vendeur.product_price)
@@ -111,8 +114,7 @@ class Entreprise(mesa.Agent):
                 vendeur.money += cout
                 vendeur.products['wheet'] -= qty
                 vendeur.step_sold += qty
-                # Important : on note la demande chez le vendeur même si on achète pas tout
-                vendeur.step_demanded += min(ble_necessaire, self.money/vendeur.product_price) 
+
                 
                 ble_necessaire -= qty
             i += 1
@@ -152,21 +154,20 @@ class Entreprise(mesa.Agent):
                 self.product_price *= 0.90 # On baisse si on a du stock invendu
             
 
-
-
-        if self.last_labor-0.2 > self.step_labor - len(self.employees)*0.01:
+        if self.last_labor > self.step_labor - len(self.employees)*0.01-0.01 and self.step_demanded < 20:
             self.product_price *= 0.90
         # Si on a vendu, on regarde la tension
         # On n'augmente que si la demande est vraiment supérieure à l'offre ET qu'on a vendu
-        elif self.step_demanded > self.step_sold:
+        elif self.step_demanded > self.step_sold and self.step_demanded > 20:
             self.product_price *= 1.05 # Hausse prudente
             
         elif current_stock > 300: # Stock trop élevé
             self.product_price *= 0.95
 
-        self.step_sold = 0
-        self.step_demanded = 0  
+ 
         print(f"Last labor : {self.last_labor:.2f} | Step Labor : {self.step_labor:.2f}")
+        self.step_sold = 0
+        self.step_demanded = 0 
         self.last_labor = self.step_labor      
         self.step_labor = 0
 
@@ -245,7 +246,7 @@ class Individual(mesa.Agent):
             
             i = 0
             while product_needed > 0.01 and accepted_price > 0.01 and i < len(entreprises):
-                vendeur = entreprises[i]
+                vendeur: Entreprise = entreprises[i]
                 
                 # Prix unitaire du vendeur
                 price = vendeur.product_price
